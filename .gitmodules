@@ -1,0 +1,3 @@
+[submodule "pi/pi_scripts"]
+	path = pi/pi_scripts
+	url = https://github.com/csiz/pi_scripts
