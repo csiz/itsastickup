@@ -1,174 +1,102 @@
 import asyncio
 import dataclasses
-import json
 import typing
+import logging
+import traceback
 
-import websockets
+from . pi_scripts import gyro
+from . websocket_server import ObservableServer
 
-from pi_scripts import gyro
+def print_exception(exc):
+  return traceback.print_exception(type(exc), exc, exc.__traceback__)
 
-
-
-class WebSocketDispatcher:
-  def __init__(self):
-    # Dict from websocket to its subscriptions.
-    self.connected = {}
-    # Dict from subscription to subscribed websockets.
-    self.subscriptions = {}
-
-
-  async def connection(self, websocket, path):
-    """Establish connection to client.
-    * Keep track of `connected`.
-    * Log connection and disconnect.
-    * Initate `send` and `recv`.
-    """
-    # Add to active connections with no subscriptions yet.
-    self.connected.setdefault(websocket, set())
-
-    address, port = websocket.remote_address
-
-    try:
-      print(f"Connected to {address}:{port} at path {path}")
-
-      await self._recv(websocket, path)
-
-      # Gracious disconnect.
-      disconnect_error = None
-
-    except Exception as exc:
-      disconnect_error = str(exc)
-      raise
-
-    finally:
-      # Discard from active connections.
-      socket_subscriptions = self.connected.pop(websocket)
-      # Remove from all subscriptions.
-      for sub in socket_subscriptions:
-        self.subscriptions[sub].remove(websocket)
-
-
-      maybe_error = "with error f{disconnect_error} " if disconnect_error else ""
-      print(f"Disconnected {maybe_error} from {address}:{port} at path {path}")
-
-
-  async def _recv(self, websocket, path):
-    async for message in websocket:
-      message = json.loads(message)
-
-
-      action = message["action"]
-
-      if action == "subscribe":
-        self._subscribe(websocket, message["event"])
-      elif action == "unsubscribe":
-        self._unsubscribe(websocket, message["event"])
-      else:
-        raise ValueError(f"Unknown action {action}")
-
-
-
-  def _subscribe(self, socket, event):
-    # Add to subscriptions, and register it for this socket.
-    self.subscriptions.setdefault(event, set()).add(socket)
-    self.connected[socket].add(event)
-
-  def _unsubscribe(self, socket, event):
-    # Remove the socket from subscription.
-    event_subscribers = self.subscriptions[event]
-    event_subscribers.remove(socket)
-    # Remove the whole event if no more subscribers.
-    if not event_subscribers:
-      self.subscriptions.pop(event)
-
-
-  async def dispatch(self, messages):
-    async for message in messages:
-
-      event = message["event"]
-
-      try:
-        subscribed = self.subscriptions[event]
-
-      except KeyError:
-        # No subscriptions, then we have no-one to send to.
-        pass
-
-      else:
-        # We have subscribers, yay :)
-
-        # Encode the message.
-        message = json.dumps(message)
-
-        # Send to all sockets.
-        for socket in subscribed:
-          # Schedule the task and forget about it; we handle disconnects via `recv`.
-          asyncio.get_event_loop().create_task(socket.send(message))
-
-
-
-
-
-async def restructure_gyro_events(observable, name):
-  """Restructure data events from gyro into `dict` messages.
-
-  Need to handle:
-
-    measure: Receives the latest Gyro.Measure from the gyro.
-    exception: Exception that occured while reading the gyro.
-    test_result: Test results from a gyro self test.
-    start: Time when the sensor starts (or restarts after reset).
-    discarded: Some measures were discared, because sensor overflow or range change.
-
-
-  """
-
-  async for event, args, kwargs in observable:
-    # Check inputs are valid.
-    assert not kwargs, "data event has no kwargs"
-    assert len(args) <= 1, "data event has at most one args"
-
-    # Add meta information, like what the event was and where it comes from.
-    data = {"event": event, "source": name}
-
-    if event == "measure":
-      data.update(dataclasses.asdict(args[0]))
-    elif event == "exception":
-      data["error"] = str(args[0])
-    elif event == "test_result":
-      raise NotImplementedError
-    elif event == "start":
-      data["start"] = args[0]
-    elif event == "discarded":
-      data["discarded"] = True
-
-    yield data
-
-
-
-
-def main():
+async def main(loop):
+  print("Starting sensors.")
   gyro_0 = gyro.Gyro()
 
-  websocket_dispatcher = WebSocketDispatcher()
+  print("Initializing server.")
+  server = ObservableServer(host="0.0.0.0", port=45223)
 
-  asyncio.get_event_loop().create_task(
-    websocket_dispatcher.dispatch(
-      restructure_gyro_events(gyro_0, "gyro_0")
-    ))
+  try:
+    # Start up server task.
+    server_task = loop.create_task(server.serve_forever())
 
-  # Start server and serve until close.
-  serve = websockets.serve(websocket_dispatcher.connection, "0.0.0.0", 45223)
+    # Start data tasks.
+    pending = list(map(loop.create_task, [
+      server.trigger_from(gyro_0),
+    ]))
 
-  print("Starting to serve!")
-  asyncio.get_event_loop().run_until_complete(serve)
-  asyncio.get_event_loop().run_forever()
-  print("Ending server!")
+    # Wait for all data task to complete; when they're all done we cna safely
+    # shutdown the server as there's nothing else to do...
+    while pending:
 
-  # Finalize gyro thread and put physical device to sleep.
-  gyro_0.close()
+      # Grab tasks as they complete and do any necessary error handling.
+      done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+
+      # Check whether all completed tasks completed gracefully.
+      for task in done:
+        try:
+          await task
+        except Exception as exc:
+          print("Unhandled exception from task:")
+          print_exception(exc)
+
+  except asyncio.CancelledError:
+    # Absorb a CancelledError and try to exit gracefully.
+    print("Exiting after cancelation...")
+
+
+  # Cleanup
+  # -------
+
+  finally:
+
+    # Wait for all pending tasks to finish in case the main task was cancelled.
+    if pending:
+      print("Cancelling unfinished tasks...")
+      unfinished_tasks = asyncio.gather(*pending, return_exceptions=True)
+      unfinished_tasks.cancel()
+      task_results = await unfinished_tasks
+      for result in task_results:
+        if isinstance(result, Exception):
+          print("Exception while cancelling unfinished tasks:")
+          print_exception(result)
+
+    print("Stopping the server...")
+    server.stop()
+    await server_task
+
+    print("Closing sensors...")
+    # Finalize gyro thread and put physical device to sleep.
+    gyro_0.close()
+
+
+    print("Cleanup complete; stopping event loop.")
+    loop.stop()
 
 if __name__ == "__main__":
-  # TODO: parse any arguments and pass them to main
+  # Parse any arguments and pass them to main
 
-  main()
+
+  # Run the main task in an event loop.
+  logging.basicConfig(level=logging.INFO)
+
+  loop = asyncio.get_event_loop()
+  loop.set_debug(True)
+
+  main_task = loop.create_task(main(loop))
+
+  try:
+    loop.run_forever()
+  except KeyboardInterrupt:
+    print("User interrupt; cancelling main task...")
+    main_task.cancel()
+    try:
+      loop.run_forever()
+    except Exception as exc:
+      print(f"Unhandled exception during task cancelling: {exc}")
+  finally:
+    print("Closing event loop.")
+    loop.close()
+
+    # Holy mother of error handling!
