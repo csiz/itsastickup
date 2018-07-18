@@ -27,12 +27,6 @@ class ObservableServer:
     # Dict from subscription to subscribed websockets.
     self.subscriptions = {}
 
-    # Event used to stop the server; see the `stop` method.
-    self._stop_event = asyncio.Event()
-
-    # Events received, waiting to be processed.
-    self._pending_events = asyncio.Queue()
-
 
   async def trigger(self, event, data):
     """Dispatch `event` to all subscribed clients."""
@@ -76,13 +70,20 @@ class ObservableServer:
   async def serve_forever(self):
     """Run the websocket message server forever, or until `stop`."""
 
+    # Event used to stop the server; see the `stop` method.
+    self._stop_event = asyncio.Event()
+
+    # Events received, waiting to be processed.
+    self._pending_events = asyncio.Queue()
+
     async with websockets.serve(self._connection, self.host, self.port):
       try:
         # Wait for the stop command.
         await self._stop_event.wait()
-      except asyncio.CancelledError:
+      except (KeyboardInterrupt, asyncio.CancelledError):
         # Exit gracefully on cancel.
-        logging.info("serve_forever() got cancelled instead of stop()")
+        logging.info("serve_forever() got interrupted instead of stop()")
+        raise
       finally:
         # Ensure the stop event was set in case we're exiting due to an error.
         self._stop_event.set()
@@ -101,6 +102,13 @@ class ObservableServer:
 
       await self._recv(websocket, path)
 
+    except (KeyboardInterrupt, asyncio.CancelledError):
+      # Connection is a floating task, if an interrupt pops up here, we should
+      # close the server down.
+      logging.info("_connection() got interrupted; stopping server")
+      self.stop()
+      raise
+
     except Exception as exc:
       # Suppress connection errors.
       logging.error(f"Disconnecting with unhandled exception: {exc}")
@@ -113,6 +121,7 @@ class ObservableServer:
         self.subscriptions[sub].remove(websocket)
 
       logging.info(f"Disconnected from {address}:{port} at path {path}")
+
 
   async def _recv(self, websocket, path):
     """Continuously receive events from client until disconnect."""
