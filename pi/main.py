@@ -19,24 +19,18 @@ def main():
   async def async_main():
 
     # We need to create these tasks within a running event loop.
-    pending = [
+    tasks = [
       server.serve_forever(),
       server.trigger_from(gyro_0),
     ]
 
     # Run all pending tasks, loggint any exceptions.
-    while pending:
-      done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
-      for task in done:
-        try:
-          await task
-        except Exception as exc:
-          print("Exception raised in running task!")
-          print_exception(exc)
+    for task in asyncio.as_completed(tasks):
+      await task
 
   try:
     # Sigh, no good way to gracefully exit on KeyboardInterrupt...
-    asyncio.run(async_main(), debug=True)
+    asyncio.run(async_main())
 
   finally:
     print("Closing sensors.")
