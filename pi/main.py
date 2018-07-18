@@ -41,9 +41,9 @@ async def main(loop):
           print("Unhandled exception from task:")
           print_exception(exc)
 
-  except asyncio.CancelledError:
+  except (KeyboardInterrupt, asyncio.CancelledError):
     # Absorb a CancelledError and try to exit gracefully.
-    print("Exiting after cancelation...")
+    print("Exiting after interrupt...")
 
 
   # Cleanup
@@ -51,28 +51,41 @@ async def main(loop):
 
   finally:
 
-    # Wait for all pending tasks to finish in case the main task was cancelled.
-    if pending:
-      print("Cancelling unfinished tasks...")
-      unfinished_tasks = asyncio.gather(*pending, return_exceptions=True)
-      unfinished_tasks.cancel()
-      task_results = await unfinished_tasks
-      for result in task_results:
-        if isinstance(result, Exception):
-          print("Exception while cancelling unfinished tasks:")
-          print_exception(result)
+    try:
 
-    print("Stopping the server...")
-    server.stop()
-    await server_task
+      # Wait for all pending tasks to finish in case the main task was cancelled.
+      if pending:
+        print("Cancelling unfinished tasks...")
+        for task in pending:
+          task.cancel()
 
-    print("Closing sensors...")
-    # Finalize gyro thread and put physical device to sleep.
-    gyro_0.close()
+        done, _ = await asyncio.wait(pending, return_when=asyncio.ALL_COMPLETED)
+
+        for task in done:
+          try:
+            await task
+          except (KeyboardInterrupt, asyncio.CancelledError):
+            # Quietly accept interrupts while unwinding.
+            pass
+          except Exception as exc:
+            print("Exception while cancelling unfinished tasks:")
+            print_exception(exc)
+
+      print("Stopping the server...")
+      server.stop()
+      await server_task
+
+    except BaseException as exc:
+      print("TODO, no whay")
+
+    finally:
+      print("Closing sensors...")
+      # Finalize gyro thread and put physical device to sleep.
+      gyro_0.close()
 
 
-    print("Cleanup complete; stopping event loop.")
-    loop.stop()
+      print("Cleanup complete; stopping event loop.")
+      loop.stop()
 
 if __name__ == "__main__":
   # Parse any arguments and pass them to main
@@ -90,11 +103,12 @@ if __name__ == "__main__":
     loop.run_forever()
   except KeyboardInterrupt:
     print("User interrupt; cancelling main task...")
-    main_task.cancel()
-    try:
-      loop.run_forever()
-    except Exception as exc:
-      print(f"Unhandled exception during task cancelling: {exc}")
+    if not main_task.done():
+      main_task.cancel()
+      try:
+        loop.run_forever()
+      except Exception as exc:
+        print(f"Unhandled exception during task cancelling: {exc}")
   finally:
     print("Closing event loop.")
     loop.close()
