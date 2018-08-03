@@ -40,12 +40,14 @@ class ObservableServer:
 
     # Encode the message.
     message = json.dumps((event, asprimitives(data)))
-
     # Send to all subscribed clients.
+
+    # TODO: would a slow client slow everyone down? not dealing with this
+    # now, but if we have to we should dump all sends in a set, and just
+    # make sure to cancel all pending on exit.
     done, _ = await asyncio.wait(
       [websocket.send(message) for websocket in subscribed],
       return_when=asyncio.ALL_COMPLETED)
-
     # Check that sending was succesful.
     for sent in done:
       try:
@@ -55,9 +57,9 @@ class ObservableServer:
         pass
 
 
-  async def trigger_from(self, async_event_source):
+  async def trigger_from(self, event, async_data_source):
     """Continuously dispatch events from an asynchornous generator."""
-    async for event, data in async_event_source:
+    async for data in async_data_source:
       await self.trigger(event, data)
 
 
@@ -140,6 +142,9 @@ class ObservableServer:
 
   def _subscribe(self, websocket, event):
     """Subscribe client to this `event` type."""
+
+    address, port = websocket.remote_address
+    logging.info(f"Subscribed to {event} from {address}:{port}")
 
     # Add to subscriptions, and register it for this socket.
     self.subscriptions.setdefault(event, set()).add(websocket)

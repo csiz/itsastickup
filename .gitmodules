@@ -1,3 +1,3 @@
-[submodule "pi/pi_scripts"]
-	path = pi/pi_scripts
+[submodule "python/pi_scripts"]
+	path = python/pi_scripts
 	url = https://github.com/csiz/pi_scripts
