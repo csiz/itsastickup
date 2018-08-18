@@ -4,6 +4,7 @@ import _ from "lodash"
 import * as d3 from "d3"
 
 import {Plot} from "./plots.js"
+import { SSL_OP_EPHEMERAL_RSA } from "constants";
 
 // Setup
 // -----
@@ -92,11 +93,25 @@ function add_measure(measure) {
   await connected
 
   on("gyro-0-measure", add_measure);
+
+  while (true) {
+    await sleep(50);
+    if (measures.length) {
+      send("move-servo", {
+        n: 1,
+        position: _.clamp((_.last(measures).acceleration[1] / 9.8 + 1.0) / 2.0, 0.0, 1.0)
+      });
+    }
+  }
 }());
 
 
 // Utils
 // -----
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
 
 function gyro_inplace_weighted_average(last_measure, measure) {
   let total_duration = last_measure.duration + measure.duration;

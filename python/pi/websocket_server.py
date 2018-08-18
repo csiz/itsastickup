@@ -63,7 +63,7 @@ class ObservableServer:
       await self.trigger(event, data)
 
 
-  async def __iter__(self):
+  async def __aiter__(self):
     while not self._stop_event.is_set():
       event_tuple = await self._pending_events.get()
       yield event_tuple
