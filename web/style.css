@@ -1,0 +1,7 @@
+#servos div {
+  display: inline-block;
+}
+
+#servos div svg {
+  display: block;
+}
