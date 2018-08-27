@@ -13,7 +13,7 @@ from .. pi_scripts.servo import Servo
 from .. pi_scripts.loop_runner import run_tasks
 from . websocket_server import ObservableServer
 
-async def main():
+async def main(commands):
   print("Starting sensors.")
   smbus = SMBus2Asyncio(1)
   await smbus.open()
@@ -27,6 +27,11 @@ async def main():
   await servos.setup(modulation_rate=50)
   servos.low_limit = 0.6
   servos.high_limit = 2.6
+
+  async def release_servos(*argv):
+    await servos.release_all()
+  commands["release"] = release_servos
+  commands["off"] = release_servos
 
 
   print("Initializing server.")
@@ -52,6 +57,8 @@ async def main():
     print("Closing sensors.")
     # Put physical device to sleep.
     await gyro_0.close()
+    print("Releasing servos.")
+    await servos.release_all()
 
 
 async def heartbeat(server):
@@ -113,5 +120,8 @@ def print_exception(exc):
 if __name__ == "__main__":
   # Setup logging, and parse any arguments and pass them to main
   logging.basicConfig(level=logging.INFO)
-  run_tasks(main())
+  # Initialize empty commands, but allow adding them from the main function.
+  commands = {}
+  # TODO: maybe there's a better way for this? Do we need a class?
+  run_tasks(main(commands), commands=commands)
 
